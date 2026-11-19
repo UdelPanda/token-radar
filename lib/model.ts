@@ -51,6 +51,31 @@
 // already trade. Apart from the two evidence-cited traded-token slugs,
 // no protocol name is ever special-cased: the same function scores
 // every row.
+//
+// Radar-3 in plain words: what this file is for and what changed.
+//
+// This file turns one sealed DefiLlama snapshot into a ranked board of
+// protocols that might still launch a token. Each row gets an implied
+// value — what a token would be worth if the market paid this kind of
+// protocol the going rate for its locked value. That rate comes from
+// the category's own live-token peers (their market cap per dollar of
+// TVL), then the score is bent by four things: how the protocol grew
+// in the last week, how long it has run without a token, how many
+// chains it lives on, and two honesty checks added in radar-3.
+//
+// The honesty checks are the point of this version. First, a protocol
+// whose token already trades is not a launch candidate at all: two
+// rows were caught doing exactly that, so they are scored at 5% of
+// their modelled value and labelled, with the market evidence kept
+// beside them (see TRADED_TOKEN_EVIDENCE). Second, some categories
+// are the wrong shape for a launch — a wrapper wraps a token that
+// already exists, a stablecoin IS the token, and a chain, a payments
+// rail or a bridge is plumbing, not an app waiting to issue
+// something — so those rows are scored at 10%, by category, never
+// by name. Two smaller fixes ride along: a farm plan only ever
+// points at a second chain when the protocol really runs on more
+// than one, and a protocol with no listing date gets no maturity
+// credit at all instead of being treated as a year old.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
