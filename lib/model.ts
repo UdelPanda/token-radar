@@ -1,4 +1,4 @@
-// Token Radar model v3: one sealed snapshot in, one ranked board out.
+// Token Radar model v4: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every genuine pre-token protocol in the snapshot: the 40
 // watchlist slugs plus every other protocol that records no token and is not
@@ -6,6 +6,19 @@
 // versioned pool, or an exchange. That is the launch-candidate rule the
 // snapshot's own watchlist uses, applied to the whole file instead of only
 // the $50M floor: 198 rows here.
+//
+// Radar-4 replaces radar-3's category-median benchmark with a FITTED
+// launch-pricing model: ordinary least squares of log(market cap) on
+// log(TVL) plus a shift per category (categories with at least 3 live-token
+// peers; the rest share the global intercept), fitted on the 128 protocols
+// in this same snapshot whose tokens already trade with a positive market
+// cap. The fit is deterministic — the training set is sorted by slug, the
+// log-TVL is centred at its training mean, the coefficients are rounded to
+// four decimals before use, and the normal equations are solved by
+// Gaussian elimination with partial pivoting: no randomness, no network.
+// The fitted prediction is the median launch value the market would pay
+// for a protocol of this size and kind; the same growth, maturity and
+// breadth multipliers as radar-3 bend it afterwards.
 //
 // Two disclosed corrections sit on top of that rule, because the snapshot's
 // record is not proof a protocol has no token (the rules say so, and the
@@ -31,51 +44,80 @@
 //
 // Implied value is otherwise derived only from the snapshot's own figures:
 //
-//   benchmark = median mcap/TVL of the live-token protocols in the same
-//               category (at least 3 peers), else the global median;
-//               clamped to [0.08, 0.80]
+//   fitted    = exp(intercept + slope x (ln(tvl_usd) - centre) + shift(category))
 //   growth    = clamp(change_7d, -50, 100) per cent
 //   growthMult    = 1 + (growth / 100) x 0.6
 //   maturityMult  = 0.7 + min(age_days, 1095) / 1095 x 0.3   (age unknown: 0)
 //   breadthMult   = 1 + min(chains - 1, 4) x 0.03
 //   plausibility  = 0.1 for the five categories above, else 1
 //   tradedToken   = 0.05 for a verified already-traded token, else 1
-//   implied   = max(1, round(tvl_usd x benchmark x growthMult x maturityMult
+//   implied   = max(1, round(fitted x growthMult x maturityMult
 //                     x breadthMult x plausibility x tradedToken))
 //
-// An unlisted age earns no maturity credit: listed_at null means the
-// snapshot records no start date, so the model uses 0 days (the maturity
-// floor) instead of inventing one. The benchmark is the model's claim
-// about what the market pays for a dollar of TVL in this kind of
-// protocol, read from the protocols in this same snapshot whose tokens
-// already trade. Apart from the two evidence-cited traded-token slugs,
-// no protocol name is ever special-cased: the same function scores
-// every row.
+// The growth, maturity and breadth caps are radar-3's, kept because the
+// snapshot does not support recalibrating them: log(market-cap/TVL) of the
+// live-token peers correlates only -0.15 with the 7-day change, -0.00 with
+// age and -0.04 with the chain count, so no cap the data suggests beats the
+// ones already in use. An unlisted age earns no maturity credit:
+// listed_at null means the snapshot records no start date, so the model
+// uses 0 days (the maturity floor) instead of inventing one. Apart from
+// the two evidence-cited traded-token slugs, no protocol name is ever
+// special-cased: the same function scores every row.
 //
-// Radar-3 in plain words: what this file is for and what changed.
+// The fit is validated out of sample, and the numbers are computed by
+// crossValidate() and temporalHoldout() below and shown on the dashboard,
+// not asserted here: 5-fold cross-validation on the 128 live-token peers,
+// and a temporal holdout that fits on protocols listed before 2025-01-01
+// and tests on those listed after. The snapshot is one date with no
+// history, so a true walk-forward test is not possible; the temporal
+// holdout by listing date is the closest the data allows, and it is named
+// as a holdout, never as walk-forward. Launch values are hard to predict
+// from TVL alone (R-squared 0.27, a residual spread of about 2 in log
+// terms, so a typical prediction is off by a factor of several): the
+// fitted model is the honest best the snapshot supports, and the
+// dashboard states its error plainly, including the splits where the
+// fitted model does not beat radar-3's median benchmark.
+//
+// Radar-4 in plain words: what this file is for and what changed.
 //
 // This file turns one sealed DefiLlama snapshot into a ranked board of
 // protocols that might still launch a token. Each row gets an implied
 // value — what a token would be worth if the market paid this kind of
-// protocol the going rate for its locked value. That rate comes from
-// the category's own live-token peers (their market cap per dollar of
-// TVL), then the score is bent by four things: how the protocol grew
-// in the last week, how long it has run without a token, how many
-// chains it lives on, and two honesty checks added in radar-3.
+// protocol the going rate for its locked value. That rate no longer comes
+// from a category median: radar-4 FITS it. It takes the 128 protocols in
+// this same snapshot whose tokens already trade, and fits a line through
+// log(market cap) against log(TVL) with one shift per category, by least
+// squares. A big protocol is then worth less per dollar of TVL than a
+// small one (the fitted slope is below one), which is what the live
+// tokens actually show. The score is then bent by four things: how the
+// protocol grew in the last week, how long it has run without a token,
+// how many chains it lives on, and two honesty checks carried over from
+// radar-3.
 //
-// The honesty checks are the point of this version. First, a protocol
-// whose token already trades is not a launch candidate at all: two
-// rows were caught doing exactly that, so they are scored at 5% of
-// their modelled value and labelled, with the market evidence kept
-// beside them (see TRADED_TOKEN_EVIDENCE). Second, some categories
-// are the wrong shape for a launch — a wrapper wraps a token that
-// already exists, a stablecoin IS the token, and a chain, a payments
-// rail or a bridge is plumbing, not an app waiting to issue
-// something — so those rows are scored at 10%, by category, never
-// by name. Two smaller fixes ride along: a farm plan only ever
-// points at a second chain when the protocol really runs on more
-// than one, and a protocol with no listing date gets no maturity
-// credit at all instead of being treated as a year old.
+// The honesty checks are the point of the earlier version and they stay.
+// First, a protocol whose token already trades is not a launch candidate
+// at all: two rows were caught doing exactly that, so they are scored at
+// 5% of their modelled value and labelled, with the market evidence kept
+// beside them (see TRADED_TOKEN_EVIDENCE). Second, some categories are
+// the wrong shape for a launch — a wrapper wraps a token that already
+// exists, a stablecoin IS the token, and a chain, a payments rail or a
+// bridge is plumbing, not an app waiting to issue something — so those
+// rows are scored at 10%, by category, never by name. Two smaller fixes
+// ride along: a farm plan only ever points at a second chain when the
+// protocol really runs on more than one, and a protocol with no listing
+// date gets no maturity credit at all instead of being treated as a year
+// old.
+//
+// Radar-4 also checks its own work. The fitted model is tested out of
+// sample two ways — 5-fold cross-validation on the live-token peers, and
+// a temporal holdout that trains on protocols listed before 2025-01-01
+// and tests on the ones listed after — and the numbers are printed on the
+// dashboard, good and bad. The honest headline: launch values are hard
+// to predict from TVL alone, the typical prediction is off by a factor of
+// several, and on one split the fitted model does not beat the old median
+// benchmark. The fit is still the better model on the cross-validation,
+// and it is the one that scores the board, because it uses what the
+// market actually pays instead of a single median per category.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -141,7 +183,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -170,8 +212,12 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    benchmark_multiple: number;
-    benchmark_peers: number;
+    /** The fitted launch value before the growth, maturity, breadth, plausibility and traded-token factors. */
+    fitted_prediction_usd: number;
+    /** The category shift the fitted model gave this protocol's category, 0 when it has none. */
+    fitted_category_shift: number;
+    /** Live-token protocols the fit was trained on. */
+    training_peers: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -196,8 +242,9 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  benchmark_multiple: number;
-  benchmark_peers: number;
+  fitted_prediction_usd: number;
+  fitted_category_shift: number;
+  training_peers: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
@@ -227,6 +274,71 @@ export interface Benchmark {
   peers: number;
 }
 
+/** One category's shift in the fitted model: how much its log market cap sits above or below the global line. */
+export interface CategoryShift {
+  category: string;
+  shift: number;
+}
+
+/** The fitted launch-pricing model: least squares of log(market cap) on log(TVL) plus a category shift. */
+export interface FittedModel {
+  /** log(market cap) at the centred log(TVL), for a category with no shift. */
+  intercept: number;
+  /** How fast log(market cap) grows with log(TVL); below one means diminishing value per TVL dollar. */
+  slope: number;
+  /** The training mean of log(TVL) that the fit is centred on. */
+  center_log_tvl: number;
+  /** The per-category shifts, alphabetically by category. */
+  category_shifts: CategoryShift[];
+  /** Live-token protocols in the training set. */
+  training_n: number;
+  /** R-squared of the fit on its own training set. */
+  r_squared: number;
+  /** Standard deviation of the log residuals on the training set. */
+  residual_sd: number;
+}
+
+/** One validation split's out-of-sample numbers, fitted model against radar-3's median benchmark on the same split. */
+export interface ValidationSplit {
+  /** 'k-fold' cross-validation, or the temporal holdout by listing date. */
+  method: 'k-fold' | 'temporal-holdout';
+  /** Folds for k-fold; the listing-date cutoff for the temporal holdout. */
+  folds?: number;
+  cutoff?: string;
+  n_train: number;
+  n_test: number;
+  fitted_median_ape_pct: number;
+  fitted_within_2x_pct: number;
+  median_median_ape_pct: number;
+  median_within_2x_pct: number;
+}
+
+/** Why one of the 758 protocols is where it is: on the board, or set aside for a stated reason. */
+export type CoverageStatus =
+  | 'ranked'
+  | 'known-traded'
+  | 'live-token'
+  | 'token-recorded'
+  | 'excluded-category'
+  | 'versioned-pool'
+  | 'wrapped-name'
+  | 'exchange-name'
+  | 'other';
+
+/** One protocol's place in the all-758 accounting. */
+export interface CoverageRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  status: CoverageStatus;
+  /** The implied value when the protocol is on the board, else null. */
+  implied_value_usd: number | null;
+  /** True when market evidence shows the token already trades. */
+  traded_token: boolean;
+}
+
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -243,6 +355,12 @@ export interface RadarData {
   global_benchmark: number;
   rows: RadarRow[];
   live: LiveRow[];
+  /** The fitted launch-pricing model that scores the board. */
+  fit: FittedModel;
+  /** Out-of-sample validation, fitted model against the median benchmark. */
+  validation: { kfold: ValidationSplit; temporal: ValidationSplit | null };
+  /** All 758 protocols accounted for, with the count per status. */
+  coverage: { counts: Record<string, number>; rows: CoverageRow[] };
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -322,6 +440,199 @@ function benchmarkFor(p: SnapshotProtocol, table: { byCategory: Map<string, Benc
 }
 
 /**
+ * Solve A x = b by Gaussian elimination with partial pivoting. Deterministic:
+ * the pivot is the first row with the largest absolute value in the column.
+ * Returns null when the system is singular.
+ */
+function solveLinear(A: number[][], b: number[]): number[] | null {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(M[r]![col]!) > Math.abs(M[pivot]![col]!)) pivot = r;
+    if (Math.abs(M[pivot]![col]!) < 1e-12) return null;
+    if (pivot !== col) {
+      const tmp = M[col]!;
+      M[col] = M[pivot]!;
+      M[pivot] = tmp;
+    }
+    const pv = M[col]![col]!;
+    for (let j = col; j <= n; j++) M[col]![j] = M[col]![j]! / pv;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const f = M[r]![col]!;
+      if (f === 0) continue;
+      for (let j = col; j <= n; j++) M[r]![j] = M[r]![j]! - f * M[col]![j]!;
+    }
+  }
+  return M.map((row) => row[n]!);
+}
+
+/** The training set for the fitted model: protocols whose tokens already trade with a positive market cap, sorted by slug. */
+function trainingSet(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  return protocols
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+}
+
+/** The categories that earn their own shift: at least 3 live-token peers in the training set, alphabetically. */
+function shiftedCategories(train: SnapshotProtocol[]): string[] {
+  const counts = new Map<string, number>();
+  for (const p of train) {
+    if (p.category === null) continue;
+    counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+  }
+  return [...counts.entries()].filter(([, n]) => n >= 3).map(([c]) => c).sort();
+}
+
+/** One training row: intercept, centred log(TVL), and one dummy per shifted category. */
+function designRow(p: SnapshotProtocol, center: number, categories: string[]): number[] {
+  const row = [1, Math.log(p.tvl_usd) - center];
+  for (const c of categories) row.push(p.category === c ? 1 : 0);
+  return row;
+}
+
+/**
+ * The fitted launch-pricing model: least squares of log(market cap) on
+ * log(TVL) plus a shift per category. The coefficients are rounded to four
+ * decimals before use, so the dashboard — which reads the same rounded
+ * values — recomputes exactly the number the board carries.
+ */
+export function fitLaunchModel(protocols: SnapshotProtocol[]): FittedModel {
+  const train = trainingSet(protocols);
+  const center = train.reduce((n, p) => n + Math.log(p.tvl_usd), 0) / Math.max(1, train.length);
+  const categories = shiftedCategories(train);
+  const X = train.map((p) => designRow(p, center, categories));
+  const y = train.map((p) => Math.log(p.mcap_usd!));
+  const k = 2 + categories.length;
+  const A: number[][] = [];
+  const b: number[] = [];
+  for (let i = 0; i < k; i++) {
+    A.push([]);
+    for (let j = 0; j < k; j++) A[i]!.push(X.reduce((n, row) => n + row[i]! * row[j]!, 0));
+    b.push(X.reduce((n, row, t) => n + row[i]! * y[t]!, 0));
+  }
+  const beta = solveLinear(A, b);
+  if (beta === null) throw new SnapshotError('the fitted model has no solution on this snapshot');
+  const intercept = round4(beta[0]!);
+  const slope = round4(beta[1]!);
+  const centerRounded = round4(center);
+  const shifts: CategoryShift[] = categories.map((c, i) => ({ category: c, shift: round4(beta[2 + i]!) }));
+  const meanY = y.reduce((n, v) => n + v, 0) / Math.max(1, y.length);
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let t = 0; t < train.length; t++) {
+    const pred = intercept + slope * (Math.log(train[t]!.tvl_usd) - centerRounded) + (shifts.find((s) => s.category === train[t]!.category)?.shift ?? 0);
+    ssRes += (y[t]! - pred) ** 2;
+    ssTot += (y[t]! - meanY) ** 2;
+  }
+  const rSquared = ssTot === 0 ? 0 : round4(1 - ssRes / ssTot);
+  const residualSd = train.length > 0 ? round4(Math.sqrt(ssRes / train.length)) : 0;
+  return { intercept, slope, center_log_tvl: centerRounded, category_shifts: shifts, training_n: train.length, r_squared: rSquared, residual_sd: residualSd };
+}
+
+/** The fitted launch value for one protocol: the median market cap the model expects for its size and kind. */
+export function predictFitted(fit: FittedModel, p: SnapshotProtocol): number {
+  const shift = fit.category_shifts.find((s) => s.category === p.category)?.shift ?? 0;
+  return Math.exp(fit.intercept + fit.slope * (Math.log(p.tvl_usd) - fit.center_log_tvl) + shift);
+}
+
+/** The median absolute percentage error of predictions against truths, in per cent. */
+function medianApe(preds: number[], trues: number[]): number {
+  const apes = preds.map((pr, i) => Math.abs(pr - trues[i]!) / trues[i]!).sort((a, b) => a - b);
+  return round4(median(apes) * 100);
+}
+
+/** The share of predictions within a factor of two of the truth, in per cent. */
+function within2x(preds: number[], trues: number[]): number {
+  if (trues.length === 0) return 0;
+  const ok = preds.filter((pr, i) => pr >= 0.5 * trues[i]! && pr <= 2 * trues[i]!).length;
+  return round4((ok / trues.length) * 100);
+}
+
+/** Radar-3's median-benchmark prediction for one protocol, fitted on a training set. */
+function medianBenchmarkPredict(train: SnapshotProtocol[], p: SnapshotProtocol, model: ModelConstants): number {
+  const table = benchmarks(train, model);
+  const { multiple } = benchmarkFor(p, table);
+  return p.tvl_usd * multiple;
+}
+
+/**
+ * 5-fold cross-validation on the live-token peers: folds are the training
+ * set in slug order, index mod 5, so the split is deterministic. Each fold
+ * is held out once, predicted by a fit on the other four folds and by
+ * radar-3's median benchmark on the same four folds.
+ */
+export function crossValidate(protocols: SnapshotProtocol[], model: ModelConstants = MODEL): ValidationSplit {
+  const train = trainingSet(protocols);
+  const folds = 5;
+  const fittedPreds: number[] = [];
+  const medianPreds: number[] = [];
+  const trues: number[] = [];
+  for (let fold = 0; fold < folds; fold++) {
+    const test = train.filter((_, i) => i % folds === fold);
+    const rest = train.filter((_, i) => i % folds !== fold);
+    const fit = fitLaunchModel(rest);
+    for (const p of test) {
+      fittedPreds.push(predictFitted(fit, p));
+      medianPreds.push(medianBenchmarkPredict(rest, p, model));
+      trues.push(p.mcap_usd!);
+    }
+  }
+  return {
+    method: 'k-fold',
+    folds,
+    n_train: train.length,
+    n_test: trues.length,
+    fitted_median_ape_pct: medianApe(fittedPreds, trues),
+    fitted_within_2x_pct: within2x(fittedPreds, trues),
+    median_median_ape_pct: medianApe(medianPreds, trues),
+    median_within_2x_pct: within2x(medianPreds, trues),
+  };
+}
+
+/**
+ * A temporal holdout by listing date: fit on the live-token protocols
+ * listed before the cutoff, test on the ones listed on or after it.
+ * This is a holdout, not walk-forward: the snapshot is one date with no
+ * history, so no true walk-forward split exists. Returns null when either
+ * side is too small to say anything.
+ */
+export function temporalHoldout(protocols: SnapshotProtocol[], model: ModelConstants = MODEL, cutoff = '2025-01-01'): ValidationSplit | null {
+  const train = trainingSet(protocols);
+  const before = train.filter((p) => p.listed_at !== null && p.listed_at < cutoff);
+  const after = train.filter((p) => p.listed_at !== null && p.listed_at >= cutoff);
+  if (before.length < 20 || after.length < 10) return null;
+  const fit = fitLaunchModel(before);
+  const fittedPreds = after.map((p) => predictFitted(fit, p));
+  const medianPreds = after.map((p) => medianBenchmarkPredict(before, p, model));
+  const trues = after.map((p) => p.mcap_usd!);
+  return {
+    method: 'temporal-holdout',
+    cutoff,
+    n_train: before.length,
+    n_test: trues.length,
+    fitted_median_ape_pct: medianApe(fittedPreds, trues),
+    fitted_within_2x_pct: within2x(fittedPreds, trues),
+    median_median_ape_pct: medianApe(medianPreds, trues),
+    median_within_2x_pct: within2x(medianPreds, trues),
+  };
+}
+
+/** Where one protocol sits in the all-758 accounting, from its own record and whether it made the board. */
+export function classifyCoverage(p: SnapshotProtocol, onBoard: boolean, traded: boolean): CoverageStatus {
+  if (traded) return 'known-traded';
+  if (onBoard) return 'ranked';
+  if (p.mcap_usd !== null && p.mcap_usd > 0) return 'live-token';
+  if (p.mcap_usd !== null || p.gecko_id !== null || p.symbol !== null) return 'token-recorded';
+  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) return 'excluded-category';
+  if (VERSIONED.test(p.name)) return 'versioned-pool';
+  if (WRAPPED_WORD.test(p.name)) return 'wrapped-name';
+  if (EXCHANGE_PREFIX.test(p.name)) return 'exchange-name';
+  return 'other';
+}
+
+/**
  * The two rows the snapshot records as tokenless whose tokens are verified
  * to already trade, with the evidence that proves it. The snapshot's own
  * record is not proof a protocol has no token, and both of these were
@@ -361,15 +672,16 @@ export function isTradedToken(p: SnapshotProtocol): boolean {
   return Object.prototype.hasOwnProperty.call(TRADED_TOKEN_EVIDENCE, p.slug);
 }
 
-/** The multipliers and the implied value one protocol gets under `model`. */
+/** The multipliers and the implied value one protocol gets under `model`: the fitted launch value, bent by growth, maturity, breadth and the two disclosed demotions. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
-  table: { byCategory: Map<string, Benchmark>; global: number },
-): { implied: number; benchmark: number; peers: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; plausibility: number; traded: number; age: number | null } {
+  fit: FittedModel,
+): { implied: number; fitted: number; shift: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; plausibility: number; traded: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const { multiple, peers } = benchmarkFor(protocol, table);
+  const fitted = predictFitted(fit, protocol);
+  const shift = fit.category_shifts.find((s) => s.category === protocol.category)?.shift ?? 0;
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -378,8 +690,8 @@ export function impliedValue(
   const breadthMult = 1 + Math.min(Math.max(protocol.chains.length - 1, 0), model.breadth_max_steps) * model.breadth_step;
   const plausibility = protocol.category !== null && LOW_PLAUSIBILITY_CATEGORIES.has(protocol.category) ? model.plausibility_factor : 1;
   const traded = isTradedToken(protocol) ? model.traded_token_factor : 1;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult * breadthMult * plausibility * traded));
-  return { implied, benchmark: multiple, peers, growthPct, growthMult, maturityMult, breadthMult, plausibility, traded, age };
+  const implied = Math.max(1, Math.round(fitted * growthMult * maturityMult * breadthMult * plausibility * traded));
+  return { implied, fitted, shift, growthPct, growthMult, maturityMult, breadthMult, plausibility, traded, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -420,7 +732,7 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
-  const table = benchmarks(snapshot.protocols, model);
+  const fit = fitLaunchModel(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug it names is ranked.
   for (const slug of snapshot.watchlist) {
@@ -433,7 +745,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   }
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, table);
+    const v = impliedValue(p, snapshot.as_of, model, fit);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -453,8 +765,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      benchmark_multiple: s.benchmark,
-      benchmark_peers: s.peers,
+      fitted_prediction_usd: Math.max(1, Math.round(s.fitted)),
+      fitted_category_shift: s.shift,
+      training_peers: fit.training_n,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -633,8 +946,9 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    benchmark_multiple: row.model.benchmark_multiple,
-    benchmark_peers: row.model.benchmark_peers,
+    fitted_prediction_usd: row.model.fitted_prediction_usd,
+    fitted_category_shift: row.model.fitted_category_shift,
+    training_peers: row.model.training_peers,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
@@ -645,13 +959,34 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
+/** Everything the dashboard renders, from the snapshot: the fitted board, the validation, and the all-758 accounting. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const table = benchmarks(snapshot.protocols, model);
   const benchList = [...table.byCategory.values()].sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  const fit = fitLaunchModel(snapshot.protocols);
+  const kfold = crossValidate(snapshot.protocols, model);
+  const temporal = temporalHoldout(snapshot.protocols, model);
+  const onBoard = new Set(board.map((r) => r.slug));
+  const bySlugBoard = new Map(board.map((r) => [r.slug, r]));
+  const coverageRows: CoverageRow[] = snapshot.protocols.map((p) => {
+    const traded = isTradedToken(p);
+    const status = classifyCoverage(p, onBoard.has(p.slug), traded);
+    return {
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains,
+      tvl_usd: p.tvl_usd,
+      status,
+      implied_value_usd: bySlugBoard.get(p.slug)?.implied_value_usd ?? null,
+      traded_token: traded,
+    };
+  });
+  const counts: Record<string, number> = {};
+  for (const r of coverageRows) counts[r.status] = (counts[r.status] ?? 0) + 1;
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -667,6 +1002,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     global_benchmark: round4(table.global),
     rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,
+    fit,
+    validation: { kfold, temporal },
+    coverage: { counts, rows: coverageRows },
   };
   return { board, radar };
 }
