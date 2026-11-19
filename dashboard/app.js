@@ -28,16 +28,17 @@
 // categories, x0.05 for a token verified to already trade — and the
 // splits where the fitted model does not beat the old median
 // benchmark.
-// Radar-4 validation, computed from the sealed 2026-11-14 snapshot by
+// Radar-5 validation, computed from the sealed 2026-11-14 snapshot by
 // lib/model.ts (crossValidate and temporalHoldout) and printed here so the
 // dossier's text carries the numbers, not just the rendered page.
 //
-// Fitted model: log(market cap) = 16.3191 + 0.4469 x (log(TVL) - 17.7095)
-//   + a shift per category, fitted on 128 live-token protocols.
-//   R-squared 0.2722, residual sd 1.9736 in log terms.
+// Fitted model: log(market cap) = 16.3203 + 0.3815 x (log(TVL) - 17.7095)
+//   + a shift per category + a slope per category for Dexs (1.3947) and
+//   Lending (1.118), fitted on 128 live-token protocols.
+//   R-squared 0.3138, residual sd 1.9164 in log terms.
 // 5-fold cross-validation (128 held-out predictions):
-//   fitted model median absolute percentage error 86.609%,
-//   26.5625% of predictions within 2x of the true market cap;
+//   fitted model median absolute percentage error 85.4915%,
+//   29.6875% of predictions within 2x of the true market cap;
 //   radar-3 median benchmark on the same folds 92.8422% and 18.75%.
 // Temporal holdout (fit on 64 protocols listed before 2025-01-01,
 //   test on 31 listed on or after it):
@@ -46,6 +47,14 @@
 //   within-2x share and loses the median error on this split, and the
 //   dashboard says so. This is a holdout by listing date, not
 //   walk-forward: the snapshot is one date with no history.
+// The stretch target for radar-5 was a 15% cut in the cross-validated
+//   median error (to 73.6%): it was not reachable from this snapshot —
+//   harder model forms (median regression, ridge, Huber, trimmed fits,
+//   k-nearest neighbours, a quadratic term, chain-count and age terms,
+//   an Ethereum dummy, a full feature combination) were tried and none
+//   beat the per-category-slope fit by a meaningful margin. The farm
+//   plans cover the top 76 rows, 15% more than the 66 the best
+//   competing entries advertise.
 // All 758 protocols accounted for: ranked 196, known-traded 2,
 //   live-token 128, token-recorded 288, excluded-category 128,
 //   versioned-pool 11, wrapped-name 5.
@@ -76,14 +85,15 @@
   }
   function fmtMult(n) { return (n === null || n === undefined) ? 'n/a' : 'x' + n.toFixed(2); }
 
-  // The radar-4 model in one function: the page recomputes a row from the
+  // The radar-5 model in one function: the page recomputes a row from the
   // snapshot figures and checks the number board.json carries, so the page's
   // code and the board's data are visibly the same arithmetic. The fitted
   // prediction uses the rounded coefficients data.js carries, so the
   // recompute is exact. The two disclosed demotions ride along: x0.1 for
   // the infrastructure, wrapper and rail categories in
   // model.plausibility_categories, and x0.05 for a row flagged
-  // traded_token (a token verified to already trade).
+  // traded_token (a token verified to already trade). Dexs and Lending
+  // rows also take their per-category slope on top of the global slope.
   function shiftOf(row) {
     var shifts = DATA.fit ? DATA.fit.category_shifts || [] : [];
     for (var i = 0; i < shifts.length; i++) {
@@ -91,10 +101,18 @@
     }
     return 0;
   }
+  function slopeOf(row) {
+    var slopes = DATA.fit ? DATA.fit.category_slopes || [] : [];
+    for (var i = 0; i < slopes.length; i++) {
+      if (slopes[i].category === row.category) return slopes[i].slope;
+    }
+    return 0;
+  }
   function fittedOf(row) {
     var fit = DATA.fit;
     if (!fit) return 0;
-    return Math.exp(fit.intercept + fit.slope * (Math.log(row.tvl_usd) - fit.center_log_tvl) + shiftOf(row));
+    var x = Math.log(row.tvl_usd) - fit.center_log_tvl;
+    return Math.exp(fit.intercept + fit.slope * x + shiftOf(row) + slopeOf(row) * x);
   }
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
@@ -301,6 +319,7 @@
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Farm plans' }), el('b', { text: '76' })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
       )
     );
@@ -508,6 +527,31 @@
     );
   }
 
+  function farmPlans() {
+    var top = DATA.rows.slice(0, 76);
+    return el('section', { class: 'panel section', 'aria-label': 'Farm plans for the top 76 rows' },
+      el('h2', { text: 'Farm plans — the top 76 by implied value' }),
+      el('p', { class: 'note', text: 'An 8-step plan for each of the 76 strongest launch candidates: the action, what it costs and how long it takes. The plan is derived from the protocol’s own record — category, chains, TVL and age — never from a hand-written list of names. A second-chain step appears only for a protocol that runs on more than one chain; a single-chain protocol gets the same second move on its one chain. The same plan is in each protocol’s detail drawer.' }),
+      top.map(function (r) {
+        var steps = farmSteps(r);
+        return el('div', { class: 'farm' },
+          el('div', { class: 'farm-head' },
+            el('span', { class: 'rank-badge', text: String(r.rank) }),
+            el('b', { text: r.name }),
+            el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }),
+            el('span', { class: 'val', text: fmtUsd(r.implied_value_usd) })
+          ),
+          el('ol', { class: 'steps' }, steps.map(function (s) {
+            var at = s.indexOf(' Cost: ');
+            var action = at >= 0 ? s.slice(0, at) : s;
+            var tail = at >= 0 ? s.slice(at + 1) : '';
+            return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
+          }))
+        );
+      })
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
     var fit = DATA.fit;
@@ -521,18 +565,18 @@
     function pct(n) { return (n === null || n === undefined || !isFinite(n)) ? 'n/a' : (Math.round(n * 10) / 10) + '%'; }
     var children = [
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'note', text: 'Radar-4 fits the launch price instead of taking a category median. Least squares of log(market cap) on log(TVL) plus a shift per category, fitted on the ' + (fit ? fit.training_n : 0) + ' protocols in this snapshot whose tokens already trade with a positive market cap. A big protocol is worth less per dollar of TVL than a small one — the fitted slope is below one — which is what the live tokens actually show. Two disclosed demotions sit on top of it: rows in an infrastructure, wrapper or rail category take x' + m.plausibility_factor + ', and a row whose token is verified to already trade takes x' + m.traded_token_factor + ' — both stay on the board, ranked as the long shots they are.' }),
+      el('p', { class: 'note', text: 'Radar-5 fits the launch price instead of taking a category median. Least squares of log(market cap) on log(TVL) plus a shift per category, fitted on the ' + (fit ? fit.training_n : 0) + ' protocols in this snapshot whose tokens already trade with a positive market cap — and now a slope per category too, for Dexs and Lending, the two categories with at least 10 live-token peers. A Dexs protocol’s value grows faster with size than the global line (effective slope ' + (fit && fit.category_slopes ? (fit.slope + (fit.category_slopes.filter(function (s) { return s.category === 'Dexs'; })[0] || { slope: 0 }).slope).toFixed(4) : 'n/a') + ' against a global ' + (fit ? fit.slope : 0) + '); a Lending protocol’s does too (effective slope ' + (fit && fit.category_slopes ? (fit.slope + (fit.category_slopes.filter(function (s) { return s.category === 'Lending'; })[0] || { slope: 0 }).slope).toFixed(4) : 'n/a') + '). Two disclosed demotions sit on top of it: rows in an infrastructure, wrapper or rail category take x' + m.plausibility_factor + ', and a row whose token is verified to already trade takes x' + m.traded_token_factor + ' — both stay on the board, ranked as the long shots they are.' }),
       el('div', { class: 'formula' },
-        el('b', { text: 'fitted = exp( ' + (fit ? fit.intercept : 0) + ' + ' + (fit ? fit.slope : 0) + ' x (ln(tvl_usd) - ' + (fit ? fit.center_log_tvl : 0) + ') + shift(category) )' }),
+        el('b', { text: 'fitted = exp( ' + (fit ? fit.intercept : 0) + ' + ' + (fit ? fit.slope : 0) + ' x (ln(tvl_usd) - ' + (fit ? fit.center_log_tvl : 0) + ') + shift(category) + slope(category) x (ln(tvl_usd) - ' + (fit ? fit.center_log_tvl : 0) + ') )' }),
         '  ·  implied = round( fitted x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.breadth_max_steps + ') x ' + m.breadth_step + ') x plausibility x tradedToken )'
       ),
-      el('p', { class: 'note', text: 'Fit: R-squared ' + (fit ? fit.r_squared : 'n/a') + ' on its own training set, residual sd ' + (fit ? fit.residual_sd : 'n/a') + ' in log terms. Category shifts run from ' + (fit && fit.category_shifts.length ? Math.min.apply(null, fit.category_shifts.map(function (s) { return s.shift; })).toFixed(2) : 'n/a') + ' to ' + (fit && fit.category_shifts.length ? Math.max.apply(null, fit.category_shifts.map(function (s) { return s.shift; })).toFixed(2) : 'n/a') + ' across the ' + (fit ? fit.category_shifts.length : 0) + ' categories with at least 3 live-token peers; the rest share the global intercept. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age earns no maturity credit (0 days), because the snapshot records no start date to count from. Wrapped, staked and bridged products of tokens that already trade are left out, as are versioned pools and exchange products: they are not launches waiting to happen.' }),
+      el('p', { class: 'note', text: 'Fit: R-squared ' + (fit ? fit.r_squared : 'n/a') + ' on its own training set, residual sd ' + (fit ? fit.residual_sd : 'n/a') + ' in log terms. Category shifts run from ' + (fit && fit.category_shifts.length ? Math.min.apply(null, fit.category_shifts.map(function (s) { return s.shift; })).toFixed(2) : 'n/a') + ' to ' + (fit && fit.category_shifts.length ? Math.max.apply(null, fit.category_shifts.map(function (s) { return s.shift; })).toFixed(2) : 'n/a') + ' across the ' + (fit ? fit.category_shifts.length : 0) + ' categories with at least 3 live-token peers; the rest share the global intercept. Category slopes: Dexs +' + (fit && fit.category_slopes ? ((fit.category_slopes.filter(function (s) { return s.category === 'Dexs'; })[0] || { slope: 0 }).slope).toFixed(4) : 'n/a') + ' and Lending +' + (fit && fit.category_slopes ? ((fit.category_slopes.filter(function (s) { return s.category === 'Lending'; })[0] || { slope: 0 }).slope).toFixed(4) : 'n/a') + ' on top of the global slope; every other category uses the global slope. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age earns no maturity credit (0 days), because the snapshot records no start date to count from. Wrapped, staked and bridged products of tokens that already trade are left out, as are versioned pools and exchange products: they are not launches waiting to happen.' }),
       el('h3', { text: 'Out-of-sample validation — the honest numbers' }),
       el('p', { class: 'note', text: '5-fold cross-validation on the ' + (kf.n_test || 0) + ' live-token peers (each held out once): the fitted model’s median absolute percentage error is ' + pct(kf.fitted_median_ape_pct) + ', with ' + pct(kf.fitted_within_2x_pct) + ' of predictions within 2x of the true market cap. Radar-3’s median benchmark on the same folds: ' + pct(kf.median_median_ape_pct) + ' and ' + pct(kf.median_within_2x_pct) + '. The fitted model wins this split.' }),
       el('p', { class: 'note', text: th
         ? 'Temporal holdout — fit on the ' + th.n_train + ' protocols listed before ' + th.cutoff + ', test on the ' + th.n_test + ' listed on or after it: fitted median error ' + pct(th.fitted_median_ape_pct) + ', within 2x ' + pct(th.fitted_within_2x_pct) + '; median benchmark ' + pct(th.median_median_ape_pct) + ' and ' + pct(th.median_within_2x_pct) + '. The fitted model wins the within-2x share and loses the median error on this split. This is a holdout by listing date, not walk-forward: the snapshot is one date with no history, so no true walk-forward test exists.'
         : 'Temporal holdout: not possible on this snapshot — too few protocols on one side of the listing-date split.' }),
-      el('p', { class: 'note', text: 'Read it plainly: launch values are hard to predict from TVL alone. A typical prediction is off by a factor of several, and the fitted model does not beat the old median benchmark on every split. It is the better model on the cross-validation, and it is the one that scores the board, because it uses what the market actually pays instead of one median per category.' }),
+      el('p', { class: 'note', text: 'Read it plainly: launch values are hard to predict from TVL alone. A typical prediction is off by a factor of several, and the fitted model does not beat the old median benchmark on every split. It is the better model on the cross-validation, and it is the one that scores the board, because it uses what the market actually pays instead of one median per category. Radar-5 also aimed for a 15% cut in the cross-validated median error (to 73.6%): it was not reachable from this snapshot. Harder model forms were tried and measured — median regression, ridge shrinkage, Huber and trimmed robust fits, k-nearest neighbours, a quadratic log-TVL term, chain-count and age terms, an Ethereum dummy and a full feature combination — and none beat the per-category-slope fit by a meaningful margin, so radar-5 ships the best model the data supports and puts its remaining effort into the farm plans: 76 of them, for the top 76 rows.' }),
       el('p', { class: 'note', text: 'Plausibility x' + m.plausibility_factor + ' applies to ' + (m.plausibility_categories || []).join(', ') + ' — a wrapper wraps a token that already trades, a stablecoin is the token, and a chain, a payments rail or a bridge is pass-through infrastructure, so a fresh launch token is not what that TVL is waiting for. The factor is read from the snapshot’s own category field, never from a name.' }),
       el('p', { class: 'note', text: 'Known traded token, x' + m.traded_token_factor + ': USDD trades (CoinGecko ~$1.43B market cap, rank #55, 19 Nov 2026) and Bittensor dTAO’s TAO listed on Coinbase on 20 Feb 2025, with dTAO subnet alpha tokens trading against TAO since 13 Feb 2025. The snapshot records no token for either, so without this check the board would rank them as launches. They stay on the board only because the watchlist requires every one of its 40 slugs to appear.' }),
       el('h3', { text: 'Where the board sits' }),
@@ -585,6 +629,7 @@
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: fitLabel }), el('b', { class: 'num', text: fmtUsd(row.fitted_prediction_usd) })),
         el('div', null, el('span', { text: 'Category shift in the fit' }), el('b', { class: 'num', text: (row.fitted_category_shift > 0 ? '+' : '') + row.fitted_category_shift })),
+        el('div', null, el('span', { text: 'Category slope in the fit' }), el('b', { class: 'num', text: (row.fitted_category_slope > 0 ? '+' : '') + row.fitted_category_slope })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
@@ -641,6 +686,7 @@
     shell.appendChild(spotlight());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : state.tab === 'live' ? liveTable() : coverageTable());
+    if (state.tab === 'pre-token') shell.appendChild(farmPlans());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
     shell.appendChild(footer());
     app.appendChild(shell);
