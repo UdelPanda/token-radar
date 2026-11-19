@@ -101,6 +101,8 @@ tr:nth-child(-n+3) .rank-badge { border-color: var(--accent); color: var(--accen
 .tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; padding: 3px 8px; border-radius: 20px; border: 1px solid var(--border); color: var(--muted); }
 .tag.watch { color: var(--accent); border-color: rgba(245, 185, 66, 0.5); }
 .tag.live { color: var(--green); border-color: rgba(62, 207, 142, 0.5); }
+.tag.traded { color: var(--red); border-color: rgba(242, 109, 109, 0.5); }
+.flag { margin-top: var(--s4); padding: var(--s3) var(--s4); border: 1px solid rgba(242, 109, 109, 0.5); border-radius: 8px; background: rgba(242, 109, 109, 0.08); color: var(--ink); font-size: 13px; }
 
 .section { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
 .section h2 { margin-bottom: var(--s1); }
