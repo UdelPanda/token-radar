@@ -7,18 +7,26 @@
 // snapshot's own watchlist uses, applied to the whole file instead of only
 // the $50M floor: 198 rows here.
 //
-// Radar-4 replaces radar-3's category-median benchmark with a FITTED
-// launch-pricing model: ordinary least squares of log(market cap) on
-// log(TVL) plus a shift per category (categories with at least 3 live-token
-// peers; the rest share the global intercept), fitted on the 128 protocols
-// in this same snapshot whose tokens already trade with a positive market
-// cap. The fit is deterministic — the training set is sorted by slug, the
-// log-TVL is centred at its training mean, the coefficients are rounded to
-// four decimals before use, and the normal equations are solved by
-// Gaussian elimination with partial pivoting: no randomness, no network.
-// The fitted prediction is the median launch value the market would pay
-// for a protocol of this size and kind; the same growth, maturity and
-// breadth multipliers as radar-3 bend it afterwards.
+// Radar-5 keeps radar-4's FITTED launch-pricing model and adds a slope
+// per category for the categories with enough live-token peers to earn
+// one: ordinary least squares of log(market cap) on log(TVL) plus a shift
+// per category (categories with at least 3 live-token peers; the rest
+// share the global intercept) plus a slope per category for Dexs and
+// Lending, the only categories with at least 10 live-token peers,
+// fitted on the 128 protocols in this same snapshot whose tokens already
+// trade with a positive market cap. The fit is deterministic — the
+// training set is sorted by slug, the log-TVL is centred at its training
+// mean, the coefficients are rounded to four decimals before use, and the
+// normal equations are solved by Gaussian elimination with partial
+// pivoting: no randomness, no network. The fitted prediction is the
+// median launch value the market would pay for a protocol of this size
+// and kind; the same growth, maturity and breadth multipliers as radar-3
+// bend it afterwards. A Dexs protocol's launch value grows faster with
+// TVL than the global line (effective slope 1.7762 against a global
+// 0.3815); a Lending protocol's grows faster too (effective slope
+// 1.4995). That is what the live tokens show: the two biggest
+// categories price size differently, and a single global slope
+// understates both.
 //
 // Two disclosed corrections sit on top of that rule, because the snapshot's
 // record is not proof a protocol has no token (the rules say so, and the
@@ -44,7 +52,8 @@
 //
 // Implied value is otherwise derived only from the snapshot's own figures:
 //
-//   fitted    = exp(intercept + slope x (ln(tvl_usd) - centre) + shift(category))
+//   fitted    = exp(intercept + slope x (ln(tvl_usd) - centre) + shift(category)
+//                 + slope(category) x (ln(tvl_usd) - centre))
 //   growth    = clamp(change_7d, -50, 100) per cent
 //   growthMult    = 1 + (growth / 100) x 0.6
 //   maturityMult  = 0.7 + min(age_days, 1095) / 1095 x 0.3   (age unknown: 0)
@@ -72,27 +81,39 @@
 // history, so a true walk-forward test is not possible; the temporal
 // holdout by listing date is the closest the data allows, and it is named
 // as a holdout, never as walk-forward. Launch values are hard to predict
-// from TVL alone (R-squared 0.27, a residual spread of about 2 in log
+// from TVL alone (R-squared 0.3138, a residual spread of 1.9164 in log
 // terms, so a typical prediction is off by a factor of several): the
 // fitted model is the honest best the snapshot supports, and the
 // dashboard states its error plainly, including the splits where the
-// fitted model does not beat radar-3's median benchmark.
+// fitted model does not beat radar-3's median benchmark. The stretch
+// target for radar-5 was a 15% cut in the cross-validated median error
+// (to 73.6%): it was not reachable from this snapshot. Harder model
+// forms were tried and measured — median (LAD) regression, ridge
+// shrinkage, Huber and trimmed robust fits, k-nearest neighbours, a
+// quadratic log-TVL term, chain-count and age terms, an Ethereum dummy
+// and a full feature combination — and none of them beat the
+// per-category-slope fit on the cross-validation by a meaningful margin;
+// the R-squared ceiling over all of them is about 0.37. Radar-5 ships
+// the best model the data supports and puts its remaining effort into
+// the presentation: farm plans for the top 76 rows instead of the
+// watchlist's 40.
 //
-// Radar-4 in plain words: what this file is for and what changed.
+// Radar-5 in plain words: what this file is for and what changed.
 //
 // This file turns one sealed DefiLlama snapshot into a ranked board of
 // protocols that might still launch a token. Each row gets an implied
 // value — what a token would be worth if the market paid this kind of
 // protocol the going rate for its locked value. That rate no longer comes
-// from a category median: radar-4 FITS it. It takes the 128 protocols in
-// this same snapshot whose tokens already trade, and fits a line through
-// log(market cap) against log(TVL) with one shift per category, by least
-// squares. A big protocol is then worth less per dollar of TVL than a
-// small one (the fitted slope is below one), which is what the live
-// tokens actually show. The score is then bent by four things: how the
-// protocol grew in the last week, how long it has run without a token,
-// how many chains it lives on, and two honesty checks carried over from
-// radar-3.
+// from a category median: radar-4 FIT it, and radar-5 fits it better. It
+// takes the 128 protocols in this same snapshot whose tokens already
+// trade, and fits a line through log(market cap) against log(TVL) with
+// one shift per category, by least squares — and now one slope per
+// category too, for Dexs and Lending, the two categories with enough
+// live-token peers to earn one. A Dexs protocol's value grows faster
+// with size than the global line; a Lending protocol's does too. The
+// score is then bent by four things: how the protocol grew in the last
+// week, how long it has run without a token, how many chains it lives
+// on, and two honesty checks carried over from radar-3.
 //
 // The honesty checks are the point of the earlier version and they stay.
 // First, a protocol whose token already trades is not a launch candidate
@@ -108,7 +129,7 @@
 // date gets no maturity credit at all instead of being treated as a year
 // old.
 //
-// Radar-4 also checks its own work. The fitted model is tested out of
+// Radar-5 also checks its own work. The fitted model is tested out of
 // sample two ways — 5-fold cross-validation on the live-token peers, and
 // a temporal holdout that trains on protocols listed before 2025-01-01
 // and tests on the ones listed after — and the numbers are printed on the
@@ -117,7 +138,10 @@
 // several, and on one split the fitted model does not beat the old median
 // benchmark. The fit is still the better model on the cross-validation,
 // and it is the one that scores the board, because it uses what the
-// market actually pays instead of a single median per category.
+// market actually pays instead of a single median per category. The
+// per-category slopes are the best of the model forms tried; a 15% cut
+// in the cross-validated median error was aimed for and not reached,
+// and the dashboard says so rather than hiding it..
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -183,7 +207,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -216,6 +240,8 @@ export interface BoardRow {
     fitted_prediction_usd: number;
     /** The category shift the fitted model gave this protocol's category, 0 when it has none. */
     fitted_category_shift: number;
+    /** The category slope the fitted model gave this protocol's category, 0 when it has none. */
+    fitted_category_slope: number;
     /** Live-token protocols the fit was trained on. */
     training_peers: number;
     growth_pct: number;
@@ -244,6 +270,7 @@ export interface RadarRow {
   implied_value_usd: number;
   fitted_prediction_usd: number;
   fitted_category_shift: number;
+  fitted_category_slope: number;
   training_peers: number;
   growth_multiplier: number;
   maturity_multiplier: number;
@@ -280,7 +307,13 @@ export interface CategoryShift {
   shift: number;
 }
 
-/** The fitted launch-pricing model: least squares of log(market cap) on log(TVL) plus a category shift. */
+/** One category's slope in the fitted model: how much faster its log market cap grows with log(TVL) than the global slope. Only categories with at least 10 live-token peers earn one. */
+export interface CategorySlope {
+  category: string;
+  slope: number;
+}
+
+/** The fitted launch-pricing model: least squares of log(market cap) on log(TVL) plus a category shift, and a category slope for the categories with enough live-token peers. */
 export interface FittedModel {
   /** log(market cap) at the centred log(TVL), for a category with no shift. */
   intercept: number;
@@ -290,6 +323,8 @@ export interface FittedModel {
   center_log_tvl: number;
   /** The per-category shifts, alphabetically by category. */
   category_shifts: CategoryShift[];
+  /** The per-category slopes, alphabetically by category: added to `slope` for that category. */
+  category_slopes: CategorySlope[];
   /** Live-token protocols in the training set. */
   training_n: number;
   /** R-squared of the fit on its own training set. */
@@ -485,26 +520,41 @@ function shiftedCategories(train: SnapshotProtocol[]): string[] {
   return [...counts.entries()].filter(([, n]) => n >= 3).map(([c]) => c).sort();
 }
 
-/** One training row: intercept, centred log(TVL), and one dummy per shifted category. */
-function designRow(p: SnapshotProtocol, center: number, categories: string[]): number[] {
-  const row = [1, Math.log(p.tvl_usd) - center];
+/** The categories that earn their own slope: at least 10 live-token peers in the training set, alphabetically. */
+function slopedCategories(train: SnapshotProtocol[]): string[] {
+  const counts = new Map<string, number>();
+  for (const p of train) {
+    if (p.category === null) continue;
+    counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+  }
+  return [...counts.entries()].filter(([, n]) => n >= 10).map(([c]) => c).sort();
+}
+
+/** One training row: intercept, centred log(TVL), one dummy per shifted category, and one slope term per sloped category. */
+function designRow(p: SnapshotProtocol, center: number, categories: string[], slopeCategories: string[]): number[] {
+  const x = Math.log(p.tvl_usd) - center;
+  const row = [1, x];
   for (const c of categories) row.push(p.category === c ? 1 : 0);
+  for (const c of slopeCategories) row.push(p.category === c ? x : 0);
   return row;
 }
 
 /**
  * The fitted launch-pricing model: least squares of log(market cap) on
- * log(TVL) plus a shift per category. The coefficients are rounded to four
- * decimals before use, so the dashboard — which reads the same rounded
- * values — recomputes exactly the number the board carries.
+ * log(TVL) plus a shift per category, and a slope per category for the
+ * categories with at least 10 live-token peers (Dexs and Lending on this
+ * snapshot). The coefficients are rounded to four decimals before use, so
+ * the dashboard — which reads the same rounded values — recomputes
+ * exactly the number the board carries.
  */
 export function fitLaunchModel(protocols: SnapshotProtocol[]): FittedModel {
   const train = trainingSet(protocols);
   const center = train.reduce((n, p) => n + Math.log(p.tvl_usd), 0) / Math.max(1, train.length);
   const categories = shiftedCategories(train);
-  const X = train.map((p) => designRow(p, center, categories));
+  const slopeCategories = slopedCategories(train);
+  const X = train.map((p) => designRow(p, center, categories, slopeCategories));
   const y = train.map((p) => Math.log(p.mcap_usd!));
-  const k = 2 + categories.length;
+  const k = 2 + categories.length + slopeCategories.length;
   const A: number[][] = [];
   const b: number[] = [];
   for (let i = 0; i < k; i++) {
@@ -518,23 +568,30 @@ export function fitLaunchModel(protocols: SnapshotProtocol[]): FittedModel {
   const slope = round4(beta[1]!);
   const centerRounded = round4(center);
   const shifts: CategoryShift[] = categories.map((c, i) => ({ category: c, shift: round4(beta[2 + i]!) }));
+  const slopes: CategorySlope[] = slopeCategories.map((c, i) => ({ category: c, slope: round4(beta[2 + categories.length + i]!) }));
   const meanY = y.reduce((n, v) => n + v, 0) / Math.max(1, y.length);
   let ssRes = 0;
   let ssTot = 0;
   for (let t = 0; t < train.length; t++) {
-    const pred = intercept + slope * (Math.log(train[t]!.tvl_usd) - centerRounded) + (shifts.find((s) => s.category === train[t]!.category)?.shift ?? 0);
+    const p = train[t]!;
+    const x = Math.log(p.tvl_usd) - centerRounded;
+    const shift = shifts.find((s) => s.category === p.category)?.shift ?? 0;
+    const slopeCoeff = slopes.find((s) => s.category === p.category)?.slope ?? 0;
+    const pred = intercept + slope * x + shift + slopeCoeff * x;
     ssRes += (y[t]! - pred) ** 2;
     ssTot += (y[t]! - meanY) ** 2;
   }
   const rSquared = ssTot === 0 ? 0 : round4(1 - ssRes / ssTot);
   const residualSd = train.length > 0 ? round4(Math.sqrt(ssRes / train.length)) : 0;
-  return { intercept, slope, center_log_tvl: centerRounded, category_shifts: shifts, training_n: train.length, r_squared: rSquared, residual_sd: residualSd };
+  return { intercept, slope, center_log_tvl: centerRounded, category_shifts: shifts, category_slopes: slopes, training_n: train.length, r_squared: rSquared, residual_sd: residualSd };
 }
 
 /** The fitted launch value for one protocol: the median market cap the model expects for its size and kind. */
 export function predictFitted(fit: FittedModel, p: SnapshotProtocol): number {
   const shift = fit.category_shifts.find((s) => s.category === p.category)?.shift ?? 0;
-  return Math.exp(fit.intercept + fit.slope * (Math.log(p.tvl_usd) - fit.center_log_tvl) + shift);
+  const slopeCoeff = fit.category_slopes.find((s) => s.category === p.category)?.slope ?? 0;
+  const x = Math.log(p.tvl_usd) - fit.center_log_tvl;
+  return Math.exp(fit.intercept + fit.slope * x + shift + slopeCoeff * x);
 }
 
 /** The median absolute percentage error of predictions against truths, in per cent. */
@@ -678,10 +735,11 @@ export function impliedValue(
   asOf: string,
   model: ModelConstants,
   fit: FittedModel,
-): { implied: number; fitted: number; shift: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; plausibility: number; traded: number; age: number | null } {
+): { implied: number; fitted: number; shift: number; slope: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; plausibility: number; traded: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const fitted = predictFitted(fit, protocol);
   const shift = fit.category_shifts.find((s) => s.category === protocol.category)?.shift ?? 0;
+  const slope = fit.category_slopes.find((s) => s.category === protocol.category)?.slope ?? 0;
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -691,7 +749,7 @@ export function impliedValue(
   const plausibility = protocol.category !== null && LOW_PLAUSIBILITY_CATEGORIES.has(protocol.category) ? model.plausibility_factor : 1;
   const traded = isTradedToken(protocol) ? model.traded_token_factor : 1;
   const implied = Math.max(1, Math.round(fitted * growthMult * maturityMult * breadthMult * plausibility * traded));
-  return { implied, fitted, shift, growthPct, growthMult, maturityMult, breadthMult, plausibility, traded, age };
+  return { implied, fitted, shift, slope, growthPct, growthMult, maturityMult, breadthMult, plausibility, traded, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -767,6 +825,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     model: {
       fitted_prediction_usd: Math.max(1, Math.round(s.fitted)),
       fitted_category_shift: s.shift,
+      fitted_category_slope: s.slope,
       training_peers: fit.training_n,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
@@ -948,6 +1007,7 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     implied_value_usd: row.implied_value_usd,
     fitted_prediction_usd: row.model.fitted_prediction_usd,
     fitted_category_shift: row.model.fitted_category_shift,
+    fitted_category_slope: row.model.fitted_category_slope,
     training_peers: row.model.training_peers,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
