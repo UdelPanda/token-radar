@@ -1,28 +1,56 @@
-// Token Radar model v2: one sealed snapshot in, one ranked board out.
+// Token Radar model v3: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every genuine pre-token protocol in the snapshot: the 40
 // watchlist slugs plus every other protocol that records no token and is not
 // a wrapped, staked or bridged product of a token that already trades, a
 // versioned pool, or an exchange. That is the launch-candidate rule the
 // snapshot's own watchlist uses, applied to the whole file instead of only
-// the $50M floor: 201 rows here. A protocol whose token already trades is
-// never ranked; the live set is shown apart, at its market value.
+// the $50M floor: 198 rows here.
 //
-// Implied value is derived only from the snapshot's own figures:
+// Two disclosed corrections sit on top of that rule, because the snapshot's
+// record is not proof a protocol has no token (the rules say so, and the
+// audit of 19 Nov 2026 caught both cases):
+//
+//   * traded-token factor (x0.05): two rows the snapshot records as
+//     tokenless are verified, against market evidence cited at
+//     TRADED_TOKEN_EVIDENCE below, to have tokens that already trade.
+//     They stay on the board — the watchlist requires every one of its
+//     40 slugs to appear — but at 5% of their modelled value, flagged
+//     on the dashboard as known traded tokens.
+//   * category plausibility factor (x0.1): five DefiLlama categories
+//     whose protocols are infrastructure, wrappers or rails, not apps
+//     waiting to issue a token — Stablecoin Wrapper, Dual-Token
+//     Stablecoin, Payments, Chain and Cross Chain Bridge. The factor is
+//     read from the snapshot's own category field, never from a name:
+//     a wrapper wraps a token that already trades, a stablecoin IS the
+//     token, and a chain, a payments rail or a bridge is pass-through
+//     infrastructure, so a fresh launch token is not what that TVL is
+//     waiting for. It demotes the watchlist's Lightning Network and Hive
+//     Protocol, which are not token launches at all, without deleting
+//     them.
+//
+// Implied value is otherwise derived only from the snapshot's own figures:
 //
 //   benchmark = median mcap/TVL of the live-token protocols in the same
 //               category (at least 3 peers), else the global median;
 //               clamped to [0.08, 0.80]
 //   growth    = clamp(change_7d, -50, 100) per cent
 //   growthMult    = 1 + (growth / 100) x 0.6
-//   maturityMult  = 0.7 + min(age_days, 1095) / 1095 x 0.3   (age unknown: 365)
+//   maturityMult  = 0.7 + min(age_days, 1095) / 1095 x 0.3   (age unknown: 0)
 //   breadthMult   = 1 + min(chains - 1, 4) x 0.03
-//   implied   = max(1, round(tvl_usd x benchmark x growthMult x maturityMult x breadthMult))
+//   plausibility  = 0.1 for the five categories above, else 1
+//   tradedToken   = 0.05 for a verified already-traded token, else 1
+//   implied   = max(1, round(tvl_usd x benchmark x growthMult x maturityMult
+//                     x breadthMult x plausibility x tradedToken))
 //
-// The benchmark is the model's claim about what the market pays for a dollar
-// of TVL in this kind of protocol, read from the protocols in this same
-// snapshot whose tokens already trade. No protocol name is ever
-// special-cased: the same function scores every row.
+// An unlisted age earns no maturity credit: listed_at null means the
+// snapshot records no start date, so the model uses 0 days (the maturity
+// floor) instead of inventing one. The benchmark is the model's claim
+// about what the market pays for a dollar of TVL in this kind of
+// protocol, read from the protocols in this same snapshot whose tokens
+// already trade. Apart from the two evidence-cited traded-token slugs,
+// no protocol name is ever special-cased: the same function scores
+// every row.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -61,6 +89,12 @@ export interface ModelConstants {
   unknown_age_days: number;
   breadth_step: number;
   breadth_max_steps: number;
+  /** The demotion for a row verified to have a token that already trades. */
+  traded_token_factor: number;
+  /** The demotion for a category that is infrastructure, a wrapper or a rail. */
+  plausibility_factor: number;
+  /** The categories the plausibility factor applies to, read from the snapshot's own category field. */
+  plausibility_categories: string[];
 }
 
 export const MODEL: ModelConstants = {
@@ -73,13 +107,16 @@ export const MODEL: ModelConstants = {
   maturity_floor: 0.7,
   maturity_range: 0.3,
   maturity_days: 1095,
-  unknown_age_days: 365,
+  unknown_age_days: 0,
   breadth_step: 0.03,
   breadth_max_steps: 4,
+  traded_token_factor: 0.05,
+  plausibility_factor: 0.1,
+  plausibility_categories: ['Stablecoin Wrapper', 'Dual-Token Stablecoin', 'Payments', 'Chain', 'Cross Chain Bridge'],
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -104,7 +141,7 @@ export interface BoardRow {
   listed_at: string | null;
   gecko_id: string | null;
   symbol: string | null;
-  token_status: 'pre-token';
+  token_status: 'pre-token' | 'known-traded-token';
   age_days: number | null;
   implied_value_usd: number;
   model: {
@@ -114,6 +151,8 @@ export interface BoardRow {
     growth_multiplier: number;
     maturity_multiplier: number;
     breadth_multiplier: number;
+    plausibility_factor: number;
+    traded_token_factor: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -137,6 +176,10 @@ export interface RadarRow {
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
+  plausibility_factor: number;
+  traded_token_factor: number;
+  /** True when market evidence (see TRADED_TOKEN_EVIDENCE) shows the token already trades. */
+  traded_token: boolean;
   watchlist: boolean;
 }
 
@@ -253,13 +296,53 @@ function benchmarkFor(p: SnapshotProtocol, table: { byCategory: Map<string, Benc
   return { multiple: round4(table.global), peers: 0 };
 }
 
+/**
+ * The two rows the snapshot records as tokenless whose tokens are verified
+ * to already trade, with the evidence that proves it. The snapshot's own
+ * record is not proof a protocol has no token, and both of these were
+ * caught against the market on 19 Nov 2026:
+ *
+ *   usdd — USDD is a stablecoin that trades: CoinGecko ~$1.43B market
+ *     cap, rank #55 (checked 19 Nov 2026). There is no launch to wait
+ *     for; the token is the product.
+ *   bittensor-dtao — TAO listed on Coinbase on 20 Feb 2025, and dTAO
+ *     went live on 13 Feb 2025 giving every subnet its own alpha token,
+ *     traded in an AMM pool against TAO. Staking TAO into a subnet is a
+ *     swap into an alpha that already exists.
+ *
+ * Each is demoted by traded_token_factor and flagged on the dashboard,
+ * but stays on the board: both are watchlist slugs, and the gate requires
+ * every watchlist slug to appear. Nothing else is listed here: a new
+ * verified case is added with its evidence, never silently.
+ */
+export const TRADED_TOKEN_EVIDENCE: Record<string, string> = {
+  'usdd': 'USDD trades: CoinGecko ~$1.43B market cap, rank #55 (19 Nov 2026)',
+  'bittensor-dtao': 'TAO listed on Coinbase 20 Feb 2025; dTAO subnet alpha tokens trade vs TAO since 13 Feb 2025',
+};
+
+/**
+ * Categories whose protocols are infrastructure, wrappers or rails, not
+ * apps waiting to issue a token. Read from the snapshot's own category
+ * field, never from a name: a Stablecoin Wrapper wraps a token that
+ * already trades; a Dual-Token Stablecoin's value is the stablecoin
+ * itself; a Payments rail, a Chain, or a Cross Chain Bridge is
+ * pass-through infrastructure. Each row in them is demoted by
+ * plausibility_factor and stays on the board.
+ */
+export const LOW_PLAUSIBILITY_CATEGORIES: ReadonlySet<string> = new Set(MODEL.plausibility_categories);
+
+/** Whether a protocol is one of the verified already-traded rows. */
+export function isTradedToken(p: SnapshotProtocol): boolean {
+  return Object.prototype.hasOwnProperty.call(TRADED_TOKEN_EVIDENCE, p.slug);
+}
+
 /** The multipliers and the implied value one protocol gets under `model`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
   table: { byCategory: Map<string, Benchmark>; global: number },
-): { implied: number; benchmark: number; peers: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
+): { implied: number; benchmark: number; peers: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; plausibility: number; traded: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const { multiple, peers } = benchmarkFor(protocol, table);
   const rawGrowth = finite(protocol.change_7d, 0);
@@ -268,8 +351,10 @@ export function impliedValue(
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   const breadthMult = 1 + Math.min(Math.max(protocol.chains.length - 1, 0), model.breadth_max_steps) * model.breadth_step;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult * breadthMult));
-  return { implied, benchmark: multiple, peers, growthPct, growthMult, maturityMult, breadthMult, age };
+  const plausibility = protocol.category !== null && LOW_PLAUSIBILITY_CATEGORIES.has(protocol.category) ? model.plausibility_factor : 1;
+  const traded = isTradedToken(protocol) ? model.traded_token_factor : 1;
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult * breadthMult * plausibility * traded));
+  return { implied, benchmark: multiple, peers, growthPct, growthMult, maturityMult, breadthMult, plausibility, traded, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -339,7 +424,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     listed_at: s.p.listed_at,
     gecko_id: s.p.gecko_id,
     symbol: s.p.symbol,
-    token_status: 'pre-token',
+    token_status: isTradedToken(s.p) ? 'known-traded-token' : 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
@@ -349,6 +434,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
       breadth_multiplier: round4(s.breadthMult),
+      plausibility_factor: s.plausibility,
+      traded_token_factor: s.traded,
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -400,17 +487,28 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
   if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
   if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
+  if (c.includes('payment')) return `Send one $${capital} payment through ${name} on ${chain} and keep the receipt.`;
   if (c.includes('chain')) return `Use ${name} once a week: send one transaction through its main app on ${chain}.`;
   return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
 }
 
-/** The category's second action: a different qualifying move from the first. */
-function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+/**
+ * The category's second action: a different qualifying move from the first.
+ * The second-chain variants are emitted ONLY when the protocol actually
+ * runs on more than one chain: telling a reader to act "on a second chain
+ * it supports" for a single-chain protocol is an impossible step, and the
+ * audit of 19 Nov 2026 found 28 of them. Single-chain protocols get the
+ * same second move on their one chain instead.
+ */
+function secondActionFor(p: SnapshotProtocol, capital: number, chain: string, multiChain: boolean): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
   const small = Math.max(25, Math.round(capital / 2));
   if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Borrow $${small} against the deposit, hold it a week, then repay it in full.`;
-  if (c.includes('dex')) return `Add $${small} of liquidity to a second ${name} pool on another chain it supports.`;
+  if (c.includes('dex')) {
+    if (multiChain) return `Add $${small} of liquidity to a second ${name} pool on another chain it supports.`;
+    return `Add $${small} of liquidity to a second ${name} pool on ${chain} with a different pair.`;
+  }
   if (c.includes('yield aggregator') || c.includes('yield')) return `Move $${small} into a second ${name} vault with a different strategy.`;
   if (c.includes('curator') || c.includes('allocator')) return `Allocate $${small} to a second ${name} curator vault with a different risk profile.`;
   if (c.includes('perpetual') || c.includes('derivative') || c.includes('basis')) return `Open a second small hedge on the opposite side and close it the same day.`;
@@ -419,8 +517,10 @@ function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): s
   if (c.includes('stable')) return `Mint $${small} of the stable asset a second time after the first settles.`;
   if (c.includes('rwa')) return `Mint a second $${small} tranche of the yield asset after the first settles.`;
   if (c.includes('insurance')) return `Buy $${small} of cover for a second risk on ${name}.`;
+  if (c.includes('payment')) return `Send a second $${small} payment through ${name} on ${chain} and keep the receipt.`;
   if (c.includes('chain')) return `Vote once in ${name}'s governance or community poll, if one is open.`;
-  return `Repeat the deposit once more with $${small} on a second chain ${name} supports.`;
+  if (multiChain) return `Repeat the deposit once more with $${small} on a second chain ${name} supports.`;
+  return `Repeat the deposit once more with $${small} on ${chain} after the first settles.`;
 }
 
 /**
@@ -444,7 +544,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes to set up',
     },
     {
-      text: secondActionFor(p, capital, chain),
+      text: secondActionFor(p, capital, chain, p.chains.length > 1),
       cost: `about $${Math.max(25, Math.round(capital / 2))} of capital and $2 of gas`,
       time: '10 minutes',
     },
@@ -459,7 +559,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: `${hold} days`,
     },
     {
-      text: `Open the protocol's own points or rewards page once a week and check that your activity is counted.`,
+      text: `Check whether ${p.name} runs a points or rewards program; if it does, open its own points page once a week and check that your activity is counted.`,
       cost: 'no fee to check',
       time: '5 minutes a week',
     },
@@ -513,6 +613,9 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
+    plausibility_factor: row.model.plausibility_factor,
+    traded_token_factor: row.model.traded_token_factor,
+    traded_token: row.token_status === 'known-traded-token',
     watchlist: onWatchlist,
   };
 }
