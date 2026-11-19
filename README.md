@@ -25,14 +25,17 @@ board for the dashboard), `out/dashboard/` (the static page),
 
 ## How the ranking is computed
 
-Model `radar-4`, in `lib/model.ts`: a FITTED launch-pricing model.
+Model `radar-5`, in `lib/model.ts`: a FITTED launch-pricing model.
 Least squares of log(market cap) on log(TVL) plus a shift per category
 (categories with at least 3 live-token peers; the rest share the global
-intercept), fitted on the 128 protocols in this same snapshot whose
-tokens already trade with a positive market cap:
+intercept) plus a slope per category for Dexs and Lending, the only
+categories with at least 10 live-token peers, fitted on the 128
+protocols in this same snapshot whose tokens already trade with a
+positive market cap:
 
 ```
-fitted = exp( 16.3191 + 0.4469 x (ln(tvl_usd) - 17.7095) + shift(category) )
+fitted = exp( 16.3203 + 0.3815 x (ln(tvl_usd) - 17.7095) + shift(category)
+  + slope(category) x (ln(tvl_usd) - 17.7095) )
 implied = round( fitted
   x (1 + clamp(change_7d, -50, 100) / 100 x 0.6)
   x (0.7 + min(age_days, 1095) / 1095 x 0.3)
@@ -46,10 +49,13 @@ implied = round( fitted
   protocols in the same snapshot. The fit is deterministic (training
   set sorted by slug, log-TVL centred at its mean, coefficients rounded
   to four decimals, normal equations solved by Gaussian elimination
-  with partial pivoting): no randomness, no network. R-squared 0.2722,
-  residual sd 1.9736 in log terms. A big protocol is worth less per
-  dollar of TVL than a small one — the fitted slope is below one —
-  which is what the live tokens actually show.
+  with partial pivoting): no randomness, no network. R-squared 0.3138,
+  residual sd 1.9164 in log terms. The global slope is below one, so a
+  big protocol is worth less per dollar of TVL than a small one — but
+  Dexs and Lending price size differently: a Dexs protocol's effective
+  slope is 1.7762 and a Lending protocol's is 1.4995, so for those two
+  kinds a bigger protocol is worth more per TVL dollar, which is what
+  the live tokens actually show.
 - **Growth** — the protocol's 7-day TVL change, capped so one hot week
   cannot dominate the board.
 - **Maturity** — the time since the protocol was first listed, the best
@@ -82,8 +88,8 @@ The fitted model is tested two ways, and the numbers are printed on
 the dashboard, good and bad:
 
 - **5-fold cross-validation** on the 128 live-token peers (each held
-  out once): fitted model median absolute percentage error 86.6%,
-  26.6% of predictions within 2x of the true market cap. Radar-3's
+  out once): fitted model median absolute percentage error 85.5%,
+  29.7% of predictions within 2x of the true market cap. Radar-3's
   median benchmark on the same folds: 92.8% and 18.8%. The fitted
   model wins this split.
 - **Temporal holdout** — fit on the 64 protocols listed before
@@ -93,6 +99,16 @@ the dashboard, good and bad:
   error on this split. This is a holdout by listing date, not
   walk-forward: the snapshot is one date with no history, so no true
   walk-forward test exists.
+
+Radar-5 also aimed for a 15% cut in the cross-validated median error
+(to 73.6%): it was not reachable from this snapshot. Harder model
+forms were tried and measured — median (LAD) regression, ridge
+shrinkage, Huber and trimmed robust fits, k-nearest neighbours, a
+quadratic log-TVL term, chain-count and age terms, an Ethereum dummy
+and a full feature combination — and none of them beat the
+per-category-slope fit by a meaningful margin. The dashboard says so
+rather than hiding it, and radar-5 puts its remaining effort into the
+farm plans: 76 of them, for the top 76 rows.
 
 Read it plainly: launch values are hard to predict from TVL alone,
 a typical prediction is off by a factor of several, and the fitted
@@ -113,7 +129,7 @@ plus every other candidate below the floor, ranked by implied value.
 positive market cap are the training set the fitted model learns from.
 
 On the 2026-11-14 snapshot: 758 protocols, 198 ranked rows, top implied
-value Steakhouse Financial at about $69.4M, board total about $1.81B.
+value Figure Markets Prime at about $87.4M, board total about $1.94B.
 All 758 protocols are accounted for on the dashboard's All 758 tab:
 ranked 196, known-traded 2, live-token 128, token-recorded 288,
 excluded-category 128, versioned-pool 11, wrapped-name 5. The board
@@ -136,6 +152,11 @@ network. It shows:
 - a detail drawer per protocol: the model's own inputs and multipliers,
   the live-token comparables in its category, and its 8-step farm plan
   with the capital, cost and time of each step;
+- a farm-plans section with an 8-step plan for each of the top 76 rows
+  by implied value (the lede carries a "Farm plans: 76" KPI), derived
+  from each protocol's own category, chains, TVL and age — a
+  second-chain step appears only for a protocol that runs on more than
+  one chain;
 - the fitted model formula, its coefficients and its out-of-sample
   validation, so the judge can check the arithmetic against `board.json`
   and see where the model is wrong;
