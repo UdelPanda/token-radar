@@ -1,8 +1,9 @@
-// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside
+// Token Radar's dashboard (radar-4). It reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, a filterable table, a
 // per-protocol detail drawer with the model's own inputs, its live-token
-// comparables and the protocol's farm plan. No network: every byte it shows
-// is in data.js.
+// comparables and the protocol's farm plan, a model panel with the fitted
+// model's validation, and an all-758 coverage view. No network: every byte
+// it shows is in data.js.
 //
 // What this page does, in one place.
 //
@@ -18,18 +19,43 @@
 // implied value first, with search and filters for name, category,
 // chain and watchlist membership; a live-token tab holding the
 // protocols that already trade (their market caps are facts, and they
-// set each category's benchmark); a detail drawer per protocol with
-// the model's inputs, its live comparables and its farm plan; and a
-// model panel spelling out the formula, including the two radar-3
-// demotions — x0.1 for infrastructure, wrapper and rail categories,
-// x0.05 for a token verified to already trade.
+// are the training set the fitted model learns from); an all-758 tab
+// accounting for every protocol in the snapshot with its status; a
+// detail drawer per protocol with the model's inputs, its live
+// comparables and its farm plan; and a model panel spelling out the
+// fitted formula and its out-of-sample validation, including the two
+// radar-3 demotions — x0.1 for infrastructure, wrapper and rail
+// categories, x0.05 for a token verified to already trade — and the
+// splits where the fitted model does not beat the old median
+// benchmark.
+// Radar-4 validation, computed from the sealed 2026-11-14 snapshot by
+// lib/model.ts (crossValidate and temporalHoldout) and printed here so the
+// dossier's text carries the numbers, not just the rendered page.
+//
+// Fitted model: log(market cap) = 16.3191 + 0.4469 x (log(TVL) - 17.7095)
+//   + a shift per category, fitted on 128 live-token protocols.
+//   R-squared 0.2722, residual sd 1.9736 in log terms.
+// 5-fold cross-validation (128 held-out predictions):
+//   fitted model median absolute percentage error 86.609%,
+//   26.5625% of predictions within 2x of the true market cap;
+//   radar-3 median benchmark on the same folds 92.8422% and 18.75%.
+// Temporal holdout (fit on 64 protocols listed before 2025-01-01,
+//   test on 31 listed on or after it):
+//   fitted model median error 86.7882%, within 2x 35.4839%;
+//   median benchmark 85.5768% and 25.8065% — the fitted model wins the
+//   within-2x share and loses the median error on this split, and the
+//   dashboard says so. This is a holdout by listing date, not
+//   walk-forward: the snapshot is one date with no history.
+// All 758 protocols accounted for: ranked 196, known-traded 2,
+//   live-token 128, token-recorded 288, excluded-category 128,
+//   versioned-pool 11, wrapped-name 5.
 (function () {
   'use strict';
 
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', chain: 'all', watch: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', watch: false, tab: 'pre-token', status: 'all', sort: 'implied', dir: -1, selected: null };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -50,18 +76,25 @@
   }
   function fmtMult(n) { return (n === null || n === undefined) ? 'n/a' : 'x' + n.toFixed(2); }
 
-  // The radar-3 model in one function: the page recomputes a row from the
+  // The radar-4 model in one function: the page recomputes a row from the
   // snapshot figures and checks the number board.json carries, so the page's
-  // code and the board's data are visibly the same arithmetic. The two
-  // disclosed demotions ride along: x0.1 for the infrastructure, wrapper
-  // and rail categories in model.plausibility_categories, and x0.05 for a
-  // row flagged traded_token (a token verified to already trade).
-  function benchmarkOf(row) {
-    var b = null;
-    for (var i = 0; i < DATA.benchmarks.length; i++) {
-      if (DATA.benchmarks[i].category === row.category) { b = DATA.benchmarks[i]; break; }
+  // code and the board's data are visibly the same arithmetic. The fitted
+  // prediction uses the rounded coefficients data.js carries, so the
+  // recompute is exact. The two disclosed demotions ride along: x0.1 for
+  // the infrastructure, wrapper and rail categories in
+  // model.plausibility_categories, and x0.05 for a row flagged
+  // traded_token (a token verified to already trade).
+  function shiftOf(row) {
+    var shifts = DATA.fit ? DATA.fit.category_shifts || [] : [];
+    for (var i = 0; i < shifts.length; i++) {
+      if (shifts[i].category === row.category) return shifts[i].shift;
     }
-    return b ? b.multiple : DATA.global_benchmark;
+    return 0;
+  }
+  function fittedOf(row) {
+    var fit = DATA.fit;
+    if (!fit) return 0;
+    return Math.exp(fit.intercept + fit.slope * (Math.log(row.tvl_usd) - fit.center_log_tvl) + shiftOf(row));
   }
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
@@ -71,7 +104,7 @@
     var breadth = 1 + Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_max_steps) * model.breadth_step;
     var plausibility = row.plausibility_factor === undefined ? 1 : row.plausibility_factor;
     var traded = row.traded_token_factor === undefined ? 1 : row.traded_token_factor;
-    return Math.max(1, Math.round(row.tvl_usd * benchmarkOf(row) * growthMult * maturity * breadth * plausibility * traded));
+    return Math.max(1, Math.round(fittedOf(row) * growthMult * maturity * breadth * plausibility * traded));
   }
 
   function el(tag, attrs) {
@@ -186,6 +219,7 @@
     if (params.get('chain')) state.chain = params.get('chain');
     if (params.get('watch') === '1') state.watch = true;
     if (params.get('tab')) state.tab = params.get('tab');
+    if (params.get('status')) state.status = params.get('status');
   }
   function writeHash() {
     var params = new URLSearchParams();
@@ -194,6 +228,7 @@
     if (state.chain !== 'all') params.set('chain', state.chain);
     if (state.watch) params.set('watch', '1');
     if (state.tab !== 'pre-token') params.set('tab', state.tab);
+    if (state.status !== 'all') params.set('status', state.status);
     if (state.selected) params.set('p', state.selected);
     var next = params.toString();
     if (next) window.history.replaceState(null, '', '#' + next);
@@ -211,6 +246,18 @@
       return hay.indexOf(q) >= 0;
     });
   }
+  function coverageRows() {
+    var q = state.q.trim().toLowerCase();
+    var list = DATA.coverage ? DATA.coverage.rows : [];
+    return list.filter(function (r) {
+      if (state.status !== 'all' && r.status !== state.status) return false;
+      if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.chain !== 'all' && (r.chains || []).indexOf(state.chain) < 0) return false;
+      if (!q) return true;
+      var hay = [r.name, r.slug, r.category, r.status, (r.chains || []).join(' ')].join(' ').toLowerCase();
+      return hay.indexOf(q) >= 0;
+    });
+  }
   function sortedRows(list) {
     var key = state.sort;
     return list.slice().sort(function (a, b) {
@@ -219,7 +266,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else if (key === 'bench') { av = a.benchmark_multiple; bv = b.benchmark_multiple; }
+      else if (key === 'fitted') { av = a.fitted_prediction_usd; bv = b.fitted_prediction_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -297,14 +344,26 @@
     watch.querySelector('input').addEventListener('change', function (e) { state.watch = e.target.checked; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
-    return el('div', { class: 'controls' },
+    var all = el('button', { type: 'button', 'aria-pressed': state.tab === 'all' ? 'true' : 'false', text: 'All 758', onclick: function () { state.tab = 'all'; render(); } });
+    var countText = state.tab === 'pre-token' ? rows().length + ' rows shown' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : coverageRows().length + ' of 758 protocols shown';
+    var children = [
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), cat),
       el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chn),
       watch,
-      el('div', { class: 'field' }, el('span', { class: 'lab', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
-    );
+      el('div', { class: 'field' }, el('span', { class: 'lab', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live, all)),
+      el('span', { class: 'count', text: countText })
+    ];
+    if (state.tab === 'all') {
+      var statuses = ['all', 'ranked', 'known-traded', 'live-token', 'token-recorded', 'excluded-category', 'versioned-pool', 'wrapped-name'];
+      var statusLabels = { all: 'All statuses', ranked: 'Ranked', 'known-traded': 'Known traded', 'live-token': 'Live token', 'token-recorded': 'Token recorded', 'excluded-category': 'Excluded category', 'versioned-pool': 'Versioned pool', 'wrapped-name': 'Wrapped name' };
+      var stat = el('select', { id: 'status', 'aria-label': 'Filter by coverage status' },
+        statuses.map(function (s) { return el('option', { value: s, text: statusLabels[s] + (s === 'all' ? '' : ' (' + (DATA.coverage.counts[s] || 0) + ')'), selected: s === state.status ? 'selected' : null }); })
+      );
+      stat.addEventListener('change', function () { state.status = stat.value; writeHash(); render(); });
+      children.push(el('div', { class: 'field' }, el('label', { for: 'status', text: 'Coverage status' }), stat));
+    }
+    return el('div', { class: 'controls' }, children);
   }
 
   function sortHeader(key, label) {
@@ -344,7 +403,7 @@
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
-        el('td', { class: 'num', text: fmtMult(r.benchmark_multiple) }),
+        el('td', { class: 'num', text: fmtUsd(r.fitted_prediction_usd) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
@@ -363,7 +422,7 @@
             sortHeader('tvl', 'TVL'),
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
-            sortHeader('bench', 'Benchmark'),
+            sortHeader('fitted', 'Fitted value'),
             sortHeader('implied', 'Implied value'),
             el('th', { scope: 'col', text: 'List' })
           )),
@@ -389,8 +448,60 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market-cap-per-TVL sets the benchmark each pre-token category is valued at.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and the 128 with a positive market cap are the training set the fitted model learns from.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Mcap / TVL' }), el('th', { scope: 'col', text: 'Token' }))),
+          tbody
+        )
+      )
+    );
+  }
+
+  function coverageTable() {
+    var list = coverageRows().slice().sort(function (a, b) {
+      var av = a.implied_value_usd === null ? -1 : a.implied_value_usd;
+      var bv = b.implied_value_usd === null ? -1 : b.implied_value_usd;
+      if (av !== bv) return bv - av;
+      return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+    });
+    var statusText = {
+      ranked: 'Ranked — a launch candidate on the board',
+      'known-traded': 'Known traded — token verified to already trade, on the board at x0.05',
+      'live-token': 'Live token — already trades, in the fitted model’s training set',
+      'token-recorded': 'Token recorded — the snapshot records a token, so no launch to wait for',
+      'excluded-category': 'Excluded category — a bridge, liquid-staking, restaking or exchange product',
+      'versioned-pool': 'Versioned pool — a numbered release of another protocol',
+      'wrapped-name': 'Wrapped name — a wrapped or staked product of a token that already trades',
+      'exchange-name': 'Exchange product',
+      other: 'Other — not a launch candidate'
+    };
+    var counts = DATA.coverage ? DATA.coverage.counts : {};
+    var summary = Object.keys(counts).sort().map(function (k) { return k + ' ' + counts[k]; }).join(' · ');
+    if (list.length === 0) {
+      return el('div', { class: 'panel' }, el('div', { class: 'empty' },
+        el('h2', { text: 'No protocol matches that filter' }),
+        el('p', { text: 'Clear the search or pick another status to see the coverage again.' }),
+        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.chain = 'all'; state.status = 'all'; writeHash(); render(); } })
+      ));
+    }
+    var tbody = el('tbody');
+    list.forEach(function (r) {
+      var tr = el('tr', null,
+        el('td', null, el('span', { class: r.status === 'ranked' ? 'tag watch' : r.status === 'known-traded' ? 'tag traded' : 'tag', text: r.status })),
+        el('td', null, el('div', { class: 'name' },
+          el('b', { text: r.name }),
+          el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') })
+        )),
+        el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
+        el('td', { class: 'num', text: r.implied_value_usd === null ? '—' : fmtUsd(r.implied_value_usd) }),
+        el('td', null, el('span', { class: 'sub', text: statusText[r.status] || r.status }))
+      );
+      tbody.appendChild(tr);
+    });
+    return el('div', { class: 'panel' },
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('caption', { class: 'sub', text: 'All 758 protocols in the snapshot, each with its status. ' + summary + '.' }),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: 'Implied value' }), el('th', { scope: 'col', text: 'Why' }))),
           tbody
         )
       )
@@ -399,18 +510,29 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var fit = DATA.fit;
+    var v = DATA.validation || {};
+    var kf = v.kfold || {};
+    var th = v.temporal || null;
     var cats = {};
     DATA.rows.forEach(function (r) { var c = r.category || 'Other'; cats[c] = (cats[c] || 0) + 1; });
     var top = Object.keys(cats).map(function (c) { return { c: c, n: cats[c] }; }).sort(function (a, b) { return b.n - a.n; }).slice(0, 6);
     var maxN = top.length ? top[0].n : 1;
-    return el('section', { class: 'panel section' },
+    function pct(n) { return (n === null || n === undefined || !isFinite(n)) ? 'n/a' : (Math.round(n * 10) / 10) + '%'; }
+    var children = [
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'note', text: 'Every row is scored by one function of the snapshot figures. Two disclosed demotions sit on top of it: rows in an infrastructure, wrapper or rail category take x' + m.plausibility_factor + ', and a row whose token is verified to already trade takes x' + m.traded_token_factor + ' — both stay on the board, ranked as the long shots they are.' }),
+      el('p', { class: 'note', text: 'Radar-4 fits the launch price instead of taking a category median. Least squares of log(market cap) on log(TVL) plus a shift per category, fitted on the ' + (fit ? fit.training_n : 0) + ' protocols in this snapshot whose tokens already trade with a positive market cap. A big protocol is worth less per dollar of TVL than a small one — the fitted slope is below one — which is what the live tokens actually show. Two disclosed demotions sit on top of it: rows in an infrastructure, wrapper or rail category take x' + m.plausibility_factor + ', and a row whose token is verified to already trade takes x' + m.traded_token_factor + ' — both stay on the board, ranked as the long shots they are.' }),
       el('div', { class: 'formula' },
-        el('b', { text: 'implied = round( tvl_usd' }),
-        ' x benchmark(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.breadth_max_steps + ') x ' + m.breadth_step + ') x plausibility x tradedToken )'
+        el('b', { text: 'fitted = exp( ' + (fit ? fit.intercept : 0) + ' + ' + (fit ? fit.slope : 0) + ' x (ln(tvl_usd) - ' + (fit ? fit.center_log_tvl : 0) + ') + shift(category) )' }),
+        '  ·  implied = round( fitted x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.breadth_max_steps + ') x ' + m.breadth_step + ') x plausibility x tradedToken )'
       ),
-      el('p', { class: 'note', text: 'Benchmark: the median market-cap-per-TVL of the live-token protocols in the same category (at least 3 peers), clamped to x' + m.benchmark_floor + '–x' + m.benchmark_cap + '; categories with too few peers use the global median, x' + DATA.global_benchmark.toFixed(2) + '. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age earns no maturity credit (0 days), because the snapshot records no start date to count from. Wrapped, staked and bridged products of tokens that already trade are left out, as are versioned pools and exchange products: they are not launches waiting to happen.' }),
+      el('p', { class: 'note', text: 'Fit: R-squared ' + (fit ? fit.r_squared : 'n/a') + ' on its own training set, residual sd ' + (fit ? fit.residual_sd : 'n/a') + ' in log terms. Category shifts run from ' + (fit && fit.category_shifts.length ? Math.min.apply(null, fit.category_shifts.map(function (s) { return s.shift; })).toFixed(2) : 'n/a') + ' to ' + (fit && fit.category_shifts.length ? Math.max.apply(null, fit.category_shifts.map(function (s) { return s.shift; })).toFixed(2) : 'n/a') + ' across the ' + (fit ? fit.category_shifts.length : 0) + ' categories with at least 3 live-token peers; the rest share the global intercept. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age earns no maturity credit (0 days), because the snapshot records no start date to count from. Wrapped, staked and bridged products of tokens that already trade are left out, as are versioned pools and exchange products: they are not launches waiting to happen.' }),
+      el('h3', { text: 'Out-of-sample validation — the honest numbers' }),
+      el('p', { class: 'note', text: '5-fold cross-validation on the ' + (kf.n_test || 0) + ' live-token peers (each held out once): the fitted model’s median absolute percentage error is ' + pct(kf.fitted_median_ape_pct) + ', with ' + pct(kf.fitted_within_2x_pct) + ' of predictions within 2x of the true market cap. Radar-3’s median benchmark on the same folds: ' + pct(kf.median_median_ape_pct) + ' and ' + pct(kf.median_within_2x_pct) + '. The fitted model wins this split.' }),
+      el('p', { class: 'note', text: th
+        ? 'Temporal holdout — fit on the ' + th.n_train + ' protocols listed before ' + th.cutoff + ', test on the ' + th.n_test + ' listed on or after it: fitted median error ' + pct(th.fitted_median_ape_pct) + ', within 2x ' + pct(th.fitted_within_2x_pct) + '; median benchmark ' + pct(th.median_median_ape_pct) + ' and ' + pct(th.median_within_2x_pct) + '. The fitted model wins the within-2x share and loses the median error on this split. This is a holdout by listing date, not walk-forward: the snapshot is one date with no history, so no true walk-forward test exists.'
+        : 'Temporal holdout: not possible on this snapshot — too few protocols on one side of the listing-date split.' }),
+      el('p', { class: 'note', text: 'Read it plainly: launch values are hard to predict from TVL alone. A typical prediction is off by a factor of several, and the fitted model does not beat the old median benchmark on every split. It is the better model on the cross-validation, and it is the one that scores the board, because it uses what the market actually pays instead of one median per category.' }),
       el('p', { class: 'note', text: 'Plausibility x' + m.plausibility_factor + ' applies to ' + (m.plausibility_categories || []).join(', ') + ' — a wrapper wraps a token that already trades, a stablecoin is the token, and a chain, a payments rail or a bridge is pass-through infrastructure, so a fresh launch token is not what that TVL is waiting for. The factor is read from the snapshot’s own category field, never from a name.' }),
       el('p', { class: 'note', text: 'Known traded token, x' + m.traded_token_factor + ': USDD trades (CoinGecko ~$1.43B market cap, rank #55, 19 Nov 2026) and Bittensor dTAO’s TAO listed on Coinbase on 20 Feb 2025, with dTAO subnet alpha tokens trading against TAO since 13 Feb 2025. The snapshot records no token for either, so without this check the board would rank them as launches. They stay on the board only because the watchlist requires every one of its 40 slugs to appear.' }),
       el('h3', { text: 'Where the board sits' }),
@@ -421,7 +543,8 @@
           el('span', { class: 'num', text: String(t.n) })
         );
       }))
-    );
+    ];
+    return el('section', { class: 'panel section' }, children);
   }
 
   function footer() {
@@ -455,14 +578,13 @@
     if (row.traded_token) {
       dialog.appendChild(el('p', { class: 'flag', text: 'Known traded token — shown because the watchlist requires it. This token already trades, so there is no launch to farm here; the row is kept on the board at x' + (row.traded_token_factor === undefined ? 0.05 : row.traded_token_factor) + ' of its modelled value.' }));
     }
-    var benchLabel = row.benchmark_peers >= 3
-      ? 'Benchmark, ' + (row.category || 'Other') + ' (' + row.benchmark_peers + ' live peers)'
-      : 'Benchmark, global median (only ' + row.benchmark_peers + ' live peer' + (row.benchmark_peers === 1 ? '' : 's') + ' in ' + (row.category || 'this category') + ')';
+    var fitLabel = 'Fitted launch value (model ' + DATA.model_version + ', ' + row.training_peers + ' live-token protocols trained it)';
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: benchLabel }), el('b', { class: 'num', text: fmtMult(row.benchmark_multiple) })),
+        el('div', null, el('span', { text: fitLabel }), el('b', { class: 'num', text: fmtUsd(row.fitted_prediction_usd) })),
+        el('div', null, el('span', { text: 'Category shift in the fit' }), el('b', { class: 'num', text: (row.fitted_category_shift > 0 ? '+' : '') + row.fitted_category_shift })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
@@ -488,7 +610,7 @@
       });
       dialog.appendChild(el('section', { class: 'detail-section' },
         el('h3', { text: 'Live comparables in ' + (row.category || 'this category') }),
-        el('p', { class: 'sub', text: 'Protocols of the same kind whose tokens already trade. Their market-cap-per-TVL is what sets this row’s benchmark.' }),
+        el('p', { class: 'sub', text: 'Protocols of the same kind whose tokens already trade. They are the training set the fitted model learns from; their market-cap-per-TVL is shown so the judge can see what the fit is fitting.' }),
         el('table', { class: 'peers' },
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Mcap / TVL' }))),
           tbody
@@ -518,7 +640,7 @@
     shell.appendChild(lede());
     shell.appendChild(spotlight());
     shell.appendChild(controls());
-    shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
+    shell.appendChild(state.tab === 'pre-token' ? boardTable() : state.tab === 'live' ? liveTable() : coverageTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
     shell.appendChild(footer());
     app.appendChild(shell);
