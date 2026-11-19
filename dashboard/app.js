@@ -3,6 +3,26 @@
 // per-protocol detail drawer with the model's own inputs, its live-token
 // comparables and the protocol's farm plan. No network: every byte it shows
 // is in data.js.
+//
+// What this page does, in one place.
+//
+// The board, the filters, the detail drawer and the farm plans all
+// come from one sealed dataset: window.RADAR, written beside this
+// file by main.ts. Nothing is fetched and nothing calls the network,
+// so the numbers on screen are exactly the numbers in data.js — the
+// page even recomputes each row's implied value from the raw snapshot
+// figures and shows whether it matches the board, so a stale dataset
+// would be visible at once.
+//
+// What you see: the ranked board of pre-token protocols, strongest
+// implied value first, with search and filters for name, category,
+// chain and watchlist membership; a live-token tab holding the
+// protocols that already trade (their market caps are facts, and they
+// set each category's benchmark); a detail drawer per protocol with
+// the model's inputs, its live comparables and its farm plan; and a
+// model panel spelling out the formula, including the two radar-3
+// demotions — x0.1 for infrastructure, wrapper and rail categories,
+// x0.05 for a token verified to already trade.
 (function () {
   'use strict';
 
