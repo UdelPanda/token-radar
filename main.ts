@@ -2,7 +2,7 @@
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or
 // --input <file|dir>), scores every genuine pre-token protocol with the
-// radar-3 model in lib/model.ts, writes the ranked board to
+// radar-4 fitted model in lib/model.ts, writes the ranked board to
 // /output/board.json, and copies this repository's dashboard/ and
 // screenshots/ to /output. Last, it writes /output/dossier.json, the
 // summary the judge reads, with the vendored make.fun library.
@@ -89,5 +89,11 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: top implied value ${board[0]!.name} at $${board[0]!.implied_value_usd}, board total $${radar.total_implied_usd}\n` +
+    `token radar: fitted model on ${radar.fit.training_n} live-token protocols, R2 ${radar.fit.r_squared}, residual sd ${radar.fit.residual_sd}\n` +
+    `token radar: 5-fold CV median APE ${radar.validation.kfold.fitted_median_ape_pct}% (median benchmark ${radar.validation.kfold.median_median_ape_pct}%), within 2x ${radar.validation.kfold.fitted_within_2x_pct}% (median benchmark ${radar.validation.kfold.median_within_2x_pct}%)\n` +
+    (radar.validation.temporal === null
+      ? `token radar: temporal holdout not possible on this snapshot\n`
+      : `token radar: temporal holdout median APE ${radar.validation.temporal.fitted_median_ape_pct}% (median benchmark ${radar.validation.temporal.median_median_ape_pct}%), within 2x ${radar.validation.temporal.fitted_within_2x_pct}% (median benchmark ${radar.validation.temporal.median_within_2x_pct}%)\n`) +
+    `token radar: all ${radar.coverage.rows.length} protocols accounted for: ${Object.entries(radar.coverage.counts).map(([k, v]) => `${k} ${v}`).join(', ')}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
